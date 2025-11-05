@@ -7,6 +7,7 @@ from struct import pack, unpack
 import struct 
 
 MAX_UNSIGNED_INT = 4294967295
+PKT_TYPE_DATA = 0x0
 
 class GBNHost():
 
@@ -63,8 +64,15 @@ class GBNHost():
         Returns:
             nothing        
         """
-        pass
-
+        
+        if (self.next_seq_num < self.window_base + self.window_size):
+            self.unacked_buffer[self.next_seq_num] = self.create_data_pkt(self.next_seq_num, payload)
+            NetworkSimulator.pass_to_network_layer(self.entity, self.unacked_buffer[self.next_seq_num])
+            if (self.window_base == self.next_seq_num):
+                NetworkSimulator.start_timer(self.entity, self.timer_interval)
+                self.next_seq_num += self.next_seq_num
+            else:
+                self.app_layer_buffer.append(payload)
 
 
     def receive_from_network_layer(self, packet):
@@ -136,8 +144,19 @@ class GBNHost():
         Returns:
             bytes: a bytes object containing the required fields for a data packet
         """
-        pass
-    
+
+        type_bytes = struct.pack('>H', PKT_TYPE_DATA)
+        seq_num_bytes = struct.pack('I', seq_num)
+        checksum_bytes = struct.pack('>H', 0)
+        encoded_payload = payload.encode('utf-8')
+        payload_bytes = struct.pack('>I', len(payload)) + encoded_payload
+
+        new_data_pkt = type_bytes + seq_num_bytes + checksum_bytes + payload_bytes
+        
+        checksum = self.create_checksum(self, new_data_pkt)
+
+        new_data_pkt = type_bytes + seq_num_bytes + checksum + payload_bytes
+        return new_data_pkt
 
     
     def create_ack_pkt(self, seq_num):
@@ -176,8 +195,18 @@ class GBNHost():
         Returns:
             int: the checksum value
         """
-        pass
+        if len(packet) % 2 == 1:
+            packet = packet + bytes(1)
 
+        summed_words = 0
+        for i in range(0, len(packet), 2):
+            word = packet[i] << 8 | packet[i+1]
+            summed_words += word
+        
+        result = (summed_words & 0xffff) + (summed_words >> 16)
+        
+        checksum = ~result & 0xffff
+        return checksum
     
     
     def unpack_pkt(self, packet):
