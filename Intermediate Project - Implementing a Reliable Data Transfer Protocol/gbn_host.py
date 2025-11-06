@@ -68,12 +68,15 @@ class GBNHost():
         
         if (self.next_seq_num < self.window_base + self.window_size):
             self.unacked_buffer[self.next_seq_num] = self.create_data_pkt(self.next_seq_num, payload)
-            NetworkSimulator.pass_to_network_layer(self.entity, self.unacked_buffer[self.next_seq_num])
+            self.simulator.pass_to_network_layer(self.entity, self.unacked_buffer[self.next_seq_num])
+
             if (self.window_base == self.next_seq_num):
-                NetworkSimulator.start_timer(self.entity, self.timer_interval)
+                self.simulator.start_timer(self.entity, self.timer_interval)
                 self.next_seq_num += self.next_seq_num
             else:
                 self.app_layer_buffer.append(payload)
+
+        
 
 
     def receive_from_network_layer(self, packet):
@@ -102,9 +105,30 @@ class GBNHost():
         Returns:
             nothing        
         """
-        pass
-    
 
+        # ACK packet receiving
+        if self.is_corrupt(packet) == True:
+            pass
+        received_packet = self.unpack_pkt(packet)
+        ack_num = received_packet["seq_num"]
+
+        if ack_num >= self.window_base:
+            self.window_base = ack_num + 1
+            self.simulator.stop_timer(self.entity, self.timer_interval)
+
+            if (self.window_base != self.next_seq_num):
+                self.simulator.start_timer(self.entity, self.timer_interval)
+            
+            while (len(self.app_layer_buffer) > 0 & self.next_seq_num < self.window_base + self.window_size):
+                payload = self.app_layer_buffer.pop()
+                self.unacked_buffer[self.next_seq_num] = self.create_data_pkt[self.next_seq_num, payload]
+                self.simulator.pass_to_network_layer(self.entity, self.unacked_buffer[self.next_seq_num])
+
+                if (self.window_base == self.next_seq_num):
+                    self.simulator.start_timer(self.entity, self.timer_interval)
+                self.next_seq_num += 1
+
+        # Data packet receiving
 
     def timer_interrupt(self):
         """ Implements the functionality that handles when a timeout occurs for the oldest unacknowledged packet
@@ -121,8 +145,10 @@ class GBNHost():
         Returns:
             None        
         """
-        pass
 
+        self.simulator.start_timer(self.entity, self.timer_interval)
+        for i in range(self.window_base, self.next_seq_num, 1):
+            self.simulator.pass_to_network_layer[self.entity, self.unacked_buffer[i]]
         
     
     def create_data_pkt(self, seq_num, payload):
@@ -154,7 +180,7 @@ class GBNHost():
 
         new_data_pkt = type_bytes + seq_num_bytes + checksum_bytes + payload_bytes
         
-        checksum = self.create_checksum(self, new_data_pkt)
+        checksum = struct.pack('!H', self.create_checksum(self, new_data_pkt))
 
         new_data_pkt = type_bytes + seq_num_bytes + checksum + payload_bytes
         return new_data_pkt
@@ -185,7 +211,7 @@ class GBNHost():
 
         new_ack_pkt = type_bytes + seq_num_bytes + checksum_bytes
         
-        checksum = self.create_checksum(self, new_ack_pkt)
+        checksum = struct.pack('!H', self.create_checksum(self, new_ack_pkt))
 
         new_ack_pkt = type_bytes + seq_num_bytes + checksum
         return new_ack_pkt
@@ -286,4 +312,19 @@ class GBNHost():
         Returns:
             bool: whether or not the packet data has been corrupted
         """
-        pass
+        
+        if len(packet) % 2 == 1:
+            packet = packet + bytes(1)
+
+        summed_words = 0
+        for i in range(0, len(packet), 2):
+            word = packet[i] << 8 | packet[i+1]
+            summed_words += word
+        
+        result = (summed_words & 0xffff) + (summed_words >> 16)
+        checksum = ~result & 0xffff
+
+        if ~checksum != 0:
+            return False
+        else:
+            return True
