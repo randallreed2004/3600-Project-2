@@ -8,6 +8,7 @@ import struct
 
 MAX_UNSIGNED_INT = 4294967295
 PKT_TYPE_DATA = 0x0
+PKT_TYPE_ACK = 0x1
 
 class GBNHost():
 
@@ -149,7 +150,7 @@ class GBNHost():
         seq_num_bytes = struct.pack('I', seq_num)
         checksum_bytes = struct.pack('>H', 0)
         encoded_payload = payload.encode('utf-8')
-        payload_bytes = struct.pack('>I', len(payload)) + encoded_payload
+        payload_bytes = struct.pack('>I', len(encoded_payload)) + encoded_payload
 
         new_data_pkt = type_bytes + seq_num_bytes + checksum_bytes + payload_bytes
         
@@ -177,8 +178,17 @@ class GBNHost():
         Returns:
             bytes: a bytes object containing the required fields for a data packet
         """
-        pass
+        
+        type_bytes = struct.pack('>H', PKT_TYPE_ACK)
+        seq_num_bytes = struct.pack('I', seq_num)
+        checksum_bytes = struct.pack('>H', 0)
 
+        new_ack_pkt = type_bytes + seq_num_bytes + checksum_bytes
+        
+        checksum = self.create_checksum(self, new_ack_pkt)
+
+        new_ack_pkt = type_bytes + seq_num_bytes + checksum
+        return new_ack_pkt
 
 
     # This function should accept a bytes object and return a checksum for the bytes object. 
@@ -233,10 +243,37 @@ class GBNHost():
         Returns:
             dictionary: a dictionary containing the different values stored in the packet
         """
-        pass
 
-    
-    
+        # since ack/data packets have different header sizes
+        # we have to unpack the type first
+        pkt_type = struct.unpack('!H', packet[0:struct.calcsize('H')]) 
+
+        # try/catch in case the packet type is corrupted?
+        try:
+            pkt_type == PKT_TYPE_DATA | PKT_TYPE_ACK
+        except ValueError:
+            print("Unknown value type.\n")
+        else:
+            if pkt_type == PKT_TYPE_DATA:
+                # unpack data into tuple excluding type and payload, avoiding magic numbers with struct.calcsize
+                unpacked_data_tuple = struct.unpack('!IHI', packet[struct.calcsize('H'):struct.calcsize('IHI')])
+                pkt_seq_num, pkt_checksum, pkt_payload_length = unpacked_data_tuple
+
+                string_unpack_format = f"{pkt_payload_length}s" # since length is variable we use this for struct.unpack()
+                pkt_payload = struct.unpack(string_unpack_format, packet[struct.calcsize('IHI'):])
+                decoded_payload = pkt_payload.decode('utf-8')
+                unpacked_dictionary = {"packet_type": pkt_type, "seq_num": pkt_seq_num, "checksum": pkt_checksum,
+                                       "payload_length": pkt_payload_length, "payload": decoded_payload}
+        
+            else:
+                unpacked_ack_tuple = struct.unpack('!IH', packet[struct.calcsize('H'):])
+                ack_seq_num, ack_checksum = unpacked_ack_tuple
+
+                unpacked_dictionary = {"packet_type": pkt_type, "seq_num": ack_seq_num, "checksum": ack_checksum}
+            
+            return unpacked_dictionary
+
+
     # This function should check to determine if a given packet is corrupt. The packet parameter accepted
     # by this function should contain a bytes object
     def is_corrupt(self, packet):
