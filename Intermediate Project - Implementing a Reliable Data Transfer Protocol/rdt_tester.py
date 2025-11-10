@@ -1,6 +1,6 @@
 import os, json, sys, re
 from optparse import OptionParser
-from tkinter.tix import DECREASING
+#from tkinter.tix import DECREASING
 from gbn_host import GBNHost
 from network_simulator import NetworkSimulator
 

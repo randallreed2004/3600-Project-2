@@ -67,16 +67,16 @@ class GBNHost():
         """
         
         if (self.next_seq_num < self.window_base + self.window_size):
-            self.unacked_buffer[self.next_seq_num] = self.create_data_pkt(self.next_seq_num, payload)
-            self.simulator.pass_to_network_layer(self.entity, self.unacked_buffer[self.next_seq_num])
+            pkt = self.create_data_pkt(self.next_seq_num, payload)
+            self.unacked_buffer[self.next_seq_num % self.window_size] = pkt
+            self.simulator.pass_to_network_layer(self.entity, pkt)
 
             if (self.window_base == self.next_seq_num):
                 self.simulator.start_timer(self.entity, self.timer_interval)
-                self.next_seq_num += self.next_seq_num
-            else:
-                self.app_layer_buffer.append(payload)
-
-        
+            
+            self.next_seq_num += 1
+        else:
+            self.app_layer_buffer.append(payload)
 
 
     def receive_from_network_layer(self, packet):
@@ -106,29 +106,63 @@ class GBNHost():
             nothing        
         """
 
-        # ACK packet receiving
-        if self.is_corrupt(packet) == True:
-            pass
-        received_packet = self.unpack_pkt(packet)
-        ack_num = received_packet["seq_num"]
-
-        if ack_num >= self.window_base:
-            self.window_base = ack_num + 1
-            self.simulator.stop_timer(self.entity, self.timer_interval)
-
-            if (self.window_base != self.next_seq_num):
-                self.simulator.start_timer(self.entity, self.timer_interval)
+        if self.is_corrupt(packet):
+            try:
+                peek_type, = struct.unpack_from('!H', packet, 0)
+            except struct.error:
+                print("Payload length field corruption")
+                peek_type = None
             
-            while (len(self.app_layer_buffer) > 0 & self.next_seq_num < self.window_base + self.window_size):
-                payload = self.app_layer_buffer.pop()
-                self.unacked_buffer[self.next_seq_num] = self.create_data_pkt[self.next_seq_num, payload]
-                self.simulator.pass_to_network_layer(self.entity, self.unacked_buffer[self.next_seq_num])
+            if peek_type == PKT_TYPE_ACK:
+                self.simulator.pass_to_network_layer(self.entity, self.last_ack_pkt)
+                return
+            else:
+                self.simulator.pass_to_network_layer(self.entity, self.last_ack_pkt)
+                return
 
-                if (self.window_base == self.next_seq_num):
+        received_packet = self.unpack_pkt(packet)
+
+        # ACK packet receiving
+        if received_packet["packet_type"] == PKT_TYPE_ACK:
+            if self.is_corrupt(packet):
+                return
+
+            ack_num = received_packet["seq_num"]
+
+            if ack_num >= self.window_base and ack_num != MAX_UNSIGNED_INT:
+                self.window_base = ack_num + 1
+                self.simulator.stop_timer(self.entity)
+
+                if (self.window_base != self.next_seq_num):
                     self.simulator.start_timer(self.entity, self.timer_interval)
-                self.next_seq_num += 1
+            
+                while (self.app_layer_buffer
+                       and self.next_seq_num < self.window_base + self.window_size):
+                    payload = self.app_layer_buffer.pop(0)
+                    pkt = self.create_data_pkt(self.next_seq_num, payload)
+                    self.unacked_buffer[self.next_seq_num % self.window_size] = pkt
+                    self.simulator.pass_to_network_layer(self.entity, pkt)
+
+                    if (self.window_base == self.next_seq_num):
+                        self.simulator.start_timer(self.entity, self.timer_interval)
+                    self.next_seq_num += 1
 
         # Data packet receiving
+        else:
+            if self.is_corrupt(packet):
+                return
+            
+            elif received_packet["seq_num"] != self.expected_seq_num:
+                self.simulator.pass_to_network_layer(self.entity, self.last_ack_pkt)
+                return
+            
+            else:
+                data = received_packet["payload"]
+                self.simulator.pass_to_application_layer(self.entity, data)
+                
+                self.last_ack_pkt = self.create_ack_pkt(self.expected_seq_num)
+                self.simulator.pass_to_network_layer(self.entity, self.last_ack_pkt)
+                self.expected_seq_num += 1
 
     def timer_interrupt(self):
         """ Implements the functionality that handles when a timeout occurs for the oldest unacknowledged packet
@@ -145,10 +179,13 @@ class GBNHost():
         Returns:
             None        
         """
+        for seq in range(self.window_base, self.next_seq_num):
+            pkt = self.unacked_buffer[seq % self.window_size]
+            if pkt is not None:
+                self.simulator.pass_to_network_layer(self.entity, pkt)
 
-        self.simulator.start_timer(self.entity, self.timer_interval)
-        for i in range(self.window_base, self.next_seq_num, 1):
-            self.simulator.pass_to_network_layer[self.entity, self.unacked_buffer[i]]
+        if self.window_base != self.next_seq_num:
+            self.simulator.start_timer(self.entity, self.timer_interval)
         
     
     def create_data_pkt(self, seq_num, payload):
@@ -172,15 +209,15 @@ class GBNHost():
             bytes: a bytes object containing the required fields for a data packet
         """
 
-        type_bytes = struct.pack('>H', PKT_TYPE_DATA)
-        seq_num_bytes = struct.pack('I', seq_num)
-        checksum_bytes = struct.pack('>H', 0)
+        type_bytes = struct.pack('!H', PKT_TYPE_DATA)
+        seq_num_bytes = struct.pack('!I', seq_num)
+        checksum_bytes = struct.pack('!H', 0)
         encoded_payload = payload.encode('utf-8')
-        payload_bytes = struct.pack('>I', len(encoded_payload)) + encoded_payload
+        payload_bytes = struct.pack('!I', len(encoded_payload)) + encoded_payload
 
         new_data_pkt = type_bytes + seq_num_bytes + checksum_bytes + payload_bytes
         
-        checksum = struct.pack('!H', self.create_checksum(self, new_data_pkt))
+        checksum = struct.pack('!H', self.create_checksum(new_data_pkt))
 
         new_data_pkt = type_bytes + seq_num_bytes + checksum + payload_bytes
         return new_data_pkt
@@ -205,13 +242,13 @@ class GBNHost():
             bytes: a bytes object containing the required fields for a data packet
         """
         
-        type_bytes = struct.pack('>H', PKT_TYPE_ACK)
-        seq_num_bytes = struct.pack('I', seq_num)
-        checksum_bytes = struct.pack('>H', 0)
+        type_bytes = struct.pack('!H', PKT_TYPE_ACK)
+        seq_num_bytes = struct.pack('!I', seq_num)
+        checksum_bytes = struct.pack('!H', 0)
 
         new_ack_pkt = type_bytes + seq_num_bytes + checksum_bytes
         
-        checksum = struct.pack('!H', self.create_checksum(self, new_ack_pkt))
+        checksum = struct.pack('!H', self.create_checksum(new_ack_pkt))
 
         new_ack_pkt = type_bytes + seq_num_bytes + checksum
         return new_ack_pkt
@@ -231,18 +268,17 @@ class GBNHost():
         Returns:
             int: the checksum value
         """
-        if len(packet) % 2 == 1:
-            packet = packet + bytes(1)
+        """Internet checksum over the whole packet with checksum field set to 0."""
+        data = packet if (len(packet) % 2 == 0) else packet + b'\x00'
 
-        summed_words = 0
-        for i in range(0, len(packet), 2):
-            word = packet[i] << 8 | packet[i+1]
-            summed_words += word
-        
-        result = (summed_words & 0xffff) + (summed_words >> 16)
-        
-        checksum = ~result & 0xffff
-        return checksum
+        total = 0
+        for i in range(0, len(data), 2):
+            total += (data[i] << 8) | data[i+1]
+            total = (total & 0xFFFF) + (total >> 16)
+
+        total = (total & 0xFFFF) + (total >> 16)
+
+        return (~total) & 0xFFFF
     
     
     def unpack_pkt(self, packet):
@@ -272,32 +308,29 @@ class GBNHost():
 
         # since ack/data packets have different header sizes
         # we have to unpack the type first
-        pkt_type = struct.unpack('!H', packet[0:struct.calcsize('H')]) 
+        pkt_type, = struct.unpack_from('!H', packet, 0) 
 
-        # try/catch in case the packet type is corrupted?
-        try:
-            pkt_type == PKT_TYPE_DATA | PKT_TYPE_ACK
-        except ValueError:
-            print("Unknown value type.\n")
-        else:
-            if pkt_type == PKT_TYPE_DATA:
-                # unpack data into tuple excluding type and payload, avoiding magic numbers with struct.calcsize
-                unpacked_data_tuple = struct.unpack('!IHI', packet[struct.calcsize('H'):struct.calcsize('IHI')])
-                pkt_seq_num, pkt_checksum, pkt_payload_length = unpacked_data_tuple
+        if pkt_type == PKT_TYPE_DATA:
+            # unpack data into tuple excluding type and payload, avoiding magic numbers with struct.calcsize
+            t, pkt_seq_num, pkt_checksum, pkt_payload_length = struct.unpack_from('!HIHI', packet, 0)
 
-                string_unpack_format = f"{pkt_payload_length}s" # since length is variable we use this for struct.unpack()
-                pkt_payload = struct.unpack(string_unpack_format, packet[struct.calcsize('IHI'):])
-                decoded_payload = pkt_payload.decode('utf-8')
-                unpacked_dictionary = {"packet_type": pkt_type, "seq_num": pkt_seq_num, "checksum": pkt_checksum,
-                                       "payload_length": pkt_payload_length, "payload": decoded_payload}
-        
-            else:
-                unpacked_ack_tuple = struct.unpack('!IH', packet[struct.calcsize('H'):])
-                ack_seq_num, ack_checksum = unpacked_ack_tuple
+            header_size = struct.calcsize('!HIHI')
+            (payload_bytes,) = struct.unpack_from(f'!{pkt_payload_length}s', packet, header_size)
+            decoded_payload = payload_bytes.decode('utf-8', errors='replace')
 
-                unpacked_dictionary = {"packet_type": pkt_type, "seq_num": ack_seq_num, "checksum": ack_checksum}
-            
+            unpacked_dictionary = {"packet_type": pkt_type, "seq_num": pkt_seq_num, "checksum": pkt_checksum,
+                                   "payload_length": pkt_payload_length, "payload": decoded_payload}
             return unpacked_dictionary
+        
+        elif pkt_type == PKT_TYPE_ACK:
+            t, ack_seq_num, ack_checksum = struct.unpack_from('!HIH', packet, 0)
+
+            unpacked_dictionary = {"packet_type": pkt_type, "seq_num": ack_seq_num, "checksum": ack_checksum}
+            return unpacked_dictionary
+        
+        else: # unknown packet type, corruption
+            raise ValueError
+
 
 
     # This function should check to determine if a given packet is corrupt. The packet parameter accepted
@@ -313,18 +346,14 @@ class GBNHost():
             bool: whether or not the packet data has been corrupted
         """
         
-        if len(packet) % 2 == 1:
-            packet = packet + bytes(1)
+        data = packet if (len(packet) % 2 == 0) else packet + b'\x00'
 
-        summed_words = 0
-        for i in range(0, len(packet), 2):
-            word = packet[i] << 8 | packet[i+1]
-            summed_words += word
-        
-        result = (summed_words & 0xffff) + (summed_words >> 16)
-        checksum = ~result & 0xffff
+        total = 0
+        for i in range(0, len(data), 2):
+            total += (data[i] << 8) | data[i+1]
+            total = (total & 0xFFFF) + (total >> 16)
 
-        if ~checksum != 0:
-            return False
-        else:
-            return True
+        total = (total & 0xFFFF) + (total >> 16)
+
+        # valid if final sum is all 1s
+        return (total & 0xFFFF) != 0xFFFF
